@@ -54,14 +54,14 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# ── Configuration ──────────────────────────────────────────────
+### ── Configuration ──────────────────────────────────────────────
 ES_HOST    = os.getenv("ES_HOST", "http://localhost:9200")
 NVD_API_KEY = os.getenv("NVD_API_KEY", "")
 INDEX_NAME  = "vulnerabilities-nvd"
 BATCH_SIZE  = 2000
 SLEEP_SEC   = 6        # respect rate limit NVD (sans clé API)
 
-# ── Logging ────────────────────────────────────────────────────
+### ── Logging ────────────────────────────────────────────────────
 os.makedirs("logs", exist_ok=True)
 logging.basicConfig(
     level=logging.INFO,
@@ -73,11 +73,11 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-# ── Connexion Elasticsearch ────────────────────────────────────
+### ── Connexion Elasticsearch ────────────────────────────────────
 def get_es_client():
     return Elasticsearch(ES_HOST)
 
-# ── Mapping de l'index ─────────────────────────────────────────
+### ── Mapping de l'index ─────────────────────────────────────────
 def create_index(es: Elasticsearch):
     mapping = {
         "mappings": {
@@ -115,7 +115,7 @@ def create_index(es: Elasticsearch):
     else:
         log.info(f"Index '{INDEX_NAME}' déjà existant.")
 
-# ── Normalisation d'un CVE ─────────────────────────────────────
+### ── Normalisation d'un CVE ─────────────────────────────────────
 def normalize_cve(cve: dict) -> dict:
     cve_id = cve.get("id", "")
 
@@ -204,7 +204,7 @@ def normalize_cve(cve: dict) -> dict:
         "source":           "NVD"
     }
 
-# ── Collecte paginée depuis l'API NVD ─────────────────────────
+### ── Collecte paginée depuis l'API NVD ─────────────────────────
 def fetch_nvd(days_back: int = 7):
     headers = {}
     if NVD_API_KEY:
@@ -261,7 +261,7 @@ def fetch_nvd(days_back: int = 7):
 
     return all_cves
 
-# ── Indexation bulk dans Elasticsearch ────────────────────────
+### ── Indexation bulk dans Elasticsearch ────────────────────────
 def index_cves(es: Elasticsearch, cves: list):
     if not cves:
         log.warning("Aucun CVE à indexer.")
@@ -284,7 +284,7 @@ def index_cves(es: Elasticsearch, cves: list):
         for e in errors[:5]:
             log.error(e)
 
-# ── Point d'entrée ─────────────────────────────────────────────
+### ── Point d'entrée ─────────────────────────────────────────────
 def run(days_back: int = 7):
     log.info("=== Démarrage collecteur NVD ===")
     start = time.time()
