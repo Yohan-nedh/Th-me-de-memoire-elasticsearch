@@ -1,3 +1,3 @@
-# Thème: Implémentation d'un moteur de recherche intelleligent avec elasticsearch pour la gestion des menaces et vulnérabilités
+# Thème : Implémentation d'un système intelligent de gestion des menaces et vulnérabilités basé sur la suite ELK
 
 ## périmetre
