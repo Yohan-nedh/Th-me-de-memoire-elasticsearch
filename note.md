@@ -452,3 +452,126 @@ echo ".env" > /home/ubuntu-server/memoire_ELK/.gitignore
 ```
 
 Dans un environnement de production, les credentials seraient gérés via un outil de gestion de secrets tel que HashiCorp Vault, remplaçant le fichier .env utilisé dans cette phase de développement.
+
+### collector_nvd.py
+Le script interroge l'API NVD toutes les X minutes, récupère les nouvelles vulnérabilités publiées, les nettoie et les stocke dans Elasticsearch pour qu'elles soient disponibles dans le dashboard Kibana.
+Lançons le test :
+
+```bash
+cd /home/ubuntu-server/memoire_ELK/collectors
+python3 collector_nvd.py 7
+```
+
+**Ce qui va se passer :**
+1. Le script se connecte à Elasticsearch
+2. Crée l'index `vulnerabilities-nvd`
+3. Interroge l'API NVD pour les 7 derniers jours
+4. Normalise chaque CVE
+5. Indexe tout dans Elasticsearch
+   
+<img width="908" height="251" alt="image" src="https://github.com/user-attachments/assets/7a0014cb-2e6c-47e6-89c9-5ba14c217e09" />
+
+### collector_cisa.py
+
+Le catalogue **CISA KEV (Known Exploited Vulnerabilities)** est une base de données publique de la Cybersecurity and Infrastructure Security Agency (CISA) répertoriant les failles de sécurité logicielles activement exploitées par des cyberattaquants. Il sert d'outil de référence essentiel pour les entreprises, leur permettant de prioriser la correction des vulnérabilités les plus dangereuses.
+
+Points clés du catalogue CISA KEV :
+Objectif : Identifier les vulnérabilités qui ont déjà été utilisées dans des attaques réelles, aidant ainsi à prioriser les correctifs les plus critiques.
+
+Contenu : Répertorie les failles par fournisseur, produit, date et description, avec des mesures correctives.
+
+Utilisation : Les équipes de sécurité (SOC) utilisent ces données pour scanner leurs systèmes, et des formats JSON/CSV permettent une automatisation.
+
+Importance : Essentiel pour la gestion proactive des risques, il aide à renforcer la posture de sécurité contre les menaces actives
+
+bon nous avons eu à lancer notre script de collecte donc le resultat est( le script est dans le dépot):
+
+<img width="908" height="251" alt="image" src="https://github.com/user-attachments/assets/db0b95cc-1142-4961-8a91-743efca2d242" />
+
+### collector_mitre.py
+
+pour voir les tactique et technique d'attaque 
+
+vérifions si nos index ont bien été enregistrés 
+```curl -s http://localhost:9200/_cat/indices?v```
+
+**note**
+La Common Weakness Enumeration (CWE) est un système de classification communautaire standardisé, maintenu par The MITRE Corporation, répertoriant les faiblesses sous-jacentes de sécurité dans les logiciels et le matériel. Elle aide les développeurs à identifier, corriger et prévenir les défauts de conception ou de code avant qu'ils ne deviennent des vulnérabilités exploitables (CVE)
+
+### script qui permet le lancement des collecteur
+Passons maintenant au **script maître** qui orchestre tout automatiquement :
+
+```bash
+cat > /home/ubuntu-server/memoire_ELK/collectors/run_all.sh << 'EOF'
+#!/bin/bash
+# ─────────────────────────────────────────────────────────────
+# Script maître — lance tous les collecteurs + corrélation
+# Exécuté automatiquement par cron toutes les 30 minutes
+# ─────────────────────────────────────────────────────────────
+
+cd /home/ubuntu-server/memoire_ELK/collectors
+
+echo "=== $(date) - Démarrage collecte ===" >> logs/cron.log
+
+# 1. Collecter les nouveaux CVE (7 derniers jours)
+echo "--- NVD ---" >> logs/cron.log
+python3 collector_nvd.py 7 >> logs/cron.log 2>&1
+
+# 2. Mettre à jour les exploits actifs CISA KEV
+echo "--- CISA KEV ---" >> logs/cron.log
+python3 collector_cisa.py >> logs/cron.log 2>&1
+
+# 3. Relancer la corrélation
+echo "--- CORRÉLATION ---" >> logs/cron.log
+python3 correlator.py >> logs/cron.log 2>&1
+
+echo "=== $(date) - Collecte terminée ===" >> logs/cron.log
+EOF
+
+chmod +x /home/ubuntu-server/memoire_ELK/collectors/run_all.sh
+
+# Tester le script
+/home/ubuntu-server/memoire_ELK/collectors/run_all.sh
+
+# Voir les logs
+tail -20 /home/ubuntu-server/memoire_ELK/collectors/logs/cron.log
+```
+
+**Le script maître fonctionne parfaitement !**
+
+Remarquez que la base a grandi  **1431 CVE** au lieu de 1381 — le cron a déjà collecté de nouveaux CVE pendant qu'on travaillait !
+
+Maintenant configurons l'**automatisation cron** :
+
+```bash
+crontab -e
+```
+
+Choisissez **nano (option 1)** et ajoutez ces lignes à la fin du fichier :
+
+```bash
+# NVD + CISA + corrélation toutes les 30 minutes
+*/30 * * * * /home/ubuntu-server/memoire_ELK/collectors/run_all.sh
+
+# MITRE ATT&CK toutes les semaines (dimanche à 2h)
+0 2 * * 0 cd /home/ubuntu-server/memoire_ELK/collectors && python3 collector_mitre.py >> logs/cron.log 2>&1
+```
+
+Sauvegardez avec `Ctrl+O` puis `Ctrl+X`.
+
+<img width="1920" height="497" alt="image" src="https://github.com/user-attachments/assets/9ba2666d-5c86-49fa-af37-e327f213cdbf" />
+
+
+**Pourquoi ces fréquences ?**
+
+| Tâche | Fréquence | Raison |
+|-------|-----------|--------|
+| NVD + CISA + corrélation | 30 min | CVE publiés en continu |
+| MITRE ATT&CK | Hebdomadaire | Framework stable, peu de changements |
+
+Vérifiez que le cron est bien enregistré :
+
+```bash
+crontab -l
+```
+
