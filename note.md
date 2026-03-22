@@ -129,3 +129,326 @@ Crée un réseau privé entre les 3 conteneurs. Ils peuvent se parler entre eux 
 
 ---
 
+### Logstash (explication brève)
+
+
+Logstash est un pipeline de traitement de données open source qui permet d'ingérer des données provenant de différentes sources, de les transformer et de les envoyer vers d'autres destinations. Il permet également de convertir des données non structurées en données structurées, de les enrichir, de les transformer et de les envoyer vers de multiples destinations(ex: elasticsearch). Logstash peut être utilisé pour :
+
+**analyser des données et des événements structurés et non structurés ;
+se connecter à différents types de sources d'entrée et de sortie, comme des fichiers, Beats, Kafka, des bases de données, Elasticsearch, etc. ; transformer des données et les stocker pour analyse ; récupérer des données depuis différentes sources, telles que des bases de données, des fichiers CSV et des fichiers.**
+
+Les trois composants du pipeline Logstash sont **Input**, **Filter** et **Output**. Voici chacun en détail :
+
+---
+
+**1. INPUT — Recevoir les données**
+
+C'est la porte d'entrée de Logstash. Il écoute et collecte les données depuis les sources. Dans le cas de ton projet sécurité, les inputs typiques sont :
+
+- `file` — lit les fichiers de logs (firewall, système)
+- `beats` — reçoit les données des agents Filebeat/Winlogbeat déployés sur les machines
+- `syslog` — écoute les journaux réseau sur le port 514
+- `tcp/udp` — capte les flux réseau bruts
+- `http` — reçoit des données via des APIs
+
+Un exemple concret de configuration :
+```
+input {
+  beats { port => 5044 }
+  syslog { port => 514 }
+}
+```
+
+---
+
+**2. FILTER — Transformer les données**
+
+C'est le cerveau du pipeline, l'étape la plus importante. Les données brutes arrivent illisibles et désordonnées, les filtres les structurent et les enrichissent. Les principaux filtres :
+
+- `grok` — découpe une ligne de log brute en champs structurés (source_ip, action, timestamp...) via des expressions régulières
+- `geoip` — ajoute la localisation géographique d'une adresse IP (pays, coordonnées)
+- `mutate` — renomme, supprime ou modifie des champs
+- `translate` — enrichit avec des données externes (CVE, IOC, réputation IP)
+- `date` — normalise les formats de date
+- `drop` — supprime les événements inutiles pour réduire le bruit
+
+Exemple :
+```
+filter {
+  grok {
+    match => { "message" => "%{SYSLOGLINE}" }
+  }
+  geoip {
+    source => "src_ip"
+  }
+}
+```
+
+---
+
+**3. OUTPUT — Envoyer les données**
+
+C'est la sortie du pipeline. Une fois transformées, les données sont acheminées vers une ou plusieurs destinations simultanément :
+
+- `elasticsearch` — destination principale, indexation pour Kibana
+- `kafka` — mise en file d'attente pour traitement asynchrone
+- `file` — sauvegarde locale
+- `stdout` — affichage console (utile en phase de débogage)
+
+Exemple :
+```
+output {
+  elasticsearch {
+    hosts => ["localhost:9200"]
+    index => "security-logs-%{+YYYY.MM.dd}"
+  }
+}
+```
+
+---
+
+**En résumé visuel :**
+
+```
+[Sources]  →  INPUT  →  FILTER  →  OUTPUT  →  [Elasticsearch]
+              (collecter)  (transformer)  (envoyer)
+```
+
+Le pipeline est séquentiel : chaque événement passe obligatoirement par ces 3 étapes dans l'ordre. C'est ce qui fait la puissance de Logstash — on peut chaîner autant de filtres que nécessaire entre l'entrée et la sortie.
+
+
+## Configuration de logstash
+### logstash.yml
+Commençons par le fichier `logstash.yml` — la configuration principale de Logstash.
+
+**C'est quoi ce fichier ?**
+C'est le fichier de paramètres globaux de Logstash. Il définit comment Logstash se comporte en général — pas ce qu'il fait avec les données (ça c'est le pipeline), mais comment il tourne.
+
+```bash
+cat > /home/ubuntu-server/memoire_ELK/logstash/config/logstash.yml << 'EOF'
+http.host: "0.0.0.0"
+xpack.monitoring.enabled: false
+EOF
+
+cat /home/ubuntu-server/memoire_ELK/logstash/config/logstash.yml
+```
+
+**Explication des deux lignes :**
+
+`http.host: "0.0.0.0"` → Logstash écoute sur toutes les interfaces réseau. Sans ça, l'API de monitoring sur le port 9600 ne serait pas accessible depuis l'extérieur du conteneur.
+
+`xpack.monitoring.enabled: false` → Désactive l'envoi de métriques de monitoring vers Elasticsearch. On n'en a pas besoin pour notre projet et ça allège le système.
+
+### logstash.conf
+
+Créons le fichier `logstash.conf` — le pipeline de traitement.
+
+**C'est quoi ce fichier ?**
+C'est le cerveau de Logstash. Il définit 3 choses dans cet ordre :
+
+```
+INPUT   → d'où viennent les données ?
+FILTER  → comment les transformer/enrichir ?
+OUTPUT  → où les envoyer ?
+```
+
+```bash
+cat > /home/ubuntu-server/memoire_ELK/logstash/pipeline/logstash.conf << 'EOF'
+input {
+  beats {
+    port => 5044
+  }
+  udp {
+    port => 5514
+    codec => plain
+    type => "syslog"
+  }
+}
+
+filter {
+  if [type] == "syslog" {
+    grok {
+      match => {
+        "message" => "%{SYSLOGTIMESTAMP:syslog_timestamp} %{SYSLOGHOST:syslog_hostname} %{DATA:syslog_program}(?:\[%{POSINT:syslog_pid}\])?: %{GREEDYDATA:syslog_message}"
+      }
+    }
+    date {
+      match => ["syslog_timestamp", "MMM  d HH:mm:ss", "MMM dd HH:mm:ss"]
+      target => "@timestamp"
+    }
+  }
+}
+
+output {
+  elasticsearch {
+    hosts => ["http://elasticsearch:9200"]
+    index => "logstash-%{+YYYY.MM.dd}"
+  }
+}
+EOF
+
+cat /home/ubuntu-server/memoire_ELK/logstash/pipeline/logstash.conf
+```
+
+### explication
+
+Parfait ! Le fichier est créé. Voici l'explication détaillée de chaque bloc :
+
+---
+
+**BLOC INPUT — D'où viennent les données ?**
+
+```
+beats {
+  port => 5044
+}
+```
+Écoute sur le port 5044 les données envoyées par **Filebeat** — un agent léger installé sur des machines pour collecter leurs logs. Par exemple si vous installez Filebeat sur un serveur Windows, il enverrait ses logs vers ce port.
+
+```
+udp {
+  port => 5514
+  codec => plain
+  type => "syslog"
+}
+```
+Écoute sur le port 5514 en **UDP** les messages Syslog. Le protocole Syslog est utilisé par les équipements réseau (routeurs, pare-feux, switches) pour envoyer leurs logs. `type => "syslog"` étiquette ces messages pour le filtre.
+
+---
+
+**BLOC FILTER — Comment transformer les données ?**
+
+```
+if [type] == "syslog" {
+```
+On applique le filtre uniquement aux messages de type syslog — pas aux logs Beats.
+
+```
+grok {
+  match => {
+    "message" => "%{SYSLOGTIMESTAMP:syslog_timestamp} ..."
+  }
+}
+```
+**Grok** est un parser qui décompose une ligne de texte brut en champs structurés. Par exemple :
+
+```
+Avant grok (texte brut) :
+"Mar 20 19:00:01 ubuntu-server sshd[1234]: Failed password for root"
+
+Après grok (structuré) :
+syslog_timestamp : "Mar 20 19:00:01"
+syslog_hostname  : "ubuntu-server"
+syslog_program   : "sshd"
+syslog_pid       : "1234"
+syslog_message   : "Failed password for root"
+```
+
+C'est très utile pour détecter des tentatives d'intrusion SSH par exemple.
+
+```
+date {
+  match => ["syslog_timestamp", "MMM  d HH:mm:ss", "MMM dd HH:mm:ss"]
+  target => "@timestamp"
+}
+```
+Convertit la date du log en vrai champ de date Elasticsearch. Sans ça, Kibana ne saurait pas quand l'événement s'est produit.
+
+---
+
+**BLOC OUTPUT — Où envoyer les données ?**
+
+```
+elasticsearch {
+  hosts => ["http://elasticsearch:9200"]
+  index => "logstash-%{+YYYY.MM.dd}"
+}
+```
+Envoie tout vers Elasticsearch. L'index est nommé automatiquement avec la date — par exemple `logstash-2026.03.20`. Ça crée un index par jour ce qui facilite la gestion et la suppression des vieilles données.
+
+---
+
+**Résumé du flux complet :**
+
+```
+Filebeat (port 5044)          Syslog UDP (port 5514)
+        ↓                              ↓
+        └──────────── INPUT ───────────┘
+                          ↓
+                       FILTER
+                 (grok parse le syslog)
+                          ↓
+                       OUTPUT
+              → elasticsearch:9200
+              → index logstash-2026.03.20
+```
+
+## Démarrage du stack ELK
+véririfier bien si vous êtes dans le dossier oui il y'a votre fichier **docker-compose.yml** et ce qui va se passer :
+
+saisissez cette commande :
+```
+docker compose up -d 
+```
+
+1. Docker télécharge les 3 images (ES, Kibana, Logstash)
+2. Elasticsearch démarre en premier
+3. Le healthcheck vérifie qu'ES est prêt
+4. Kibana et Logstash démarrent ensuite
+
+ <img width="1918" height="95" alt="image" src="https://github.com/user-attachments/assets/63a1658a-08c6-4b9e-8f00-421f87a2a823" />
+
+```
+# Vérifier l'état des conteneurs
+docker ps | grep -E "elasticsearch|kibana|logstash"
+
+# Tester Elasticsearch
+curl http://localhost:9200
+
+# Tester Kibana
+curl -s http://localhost:5601/api/status | python3 -m json.tool | grep -E "level|summary" | head -3
+ ``` 
+La stack ELK de base est complète et fonctionnelle. Passons maintenant aux collecteurs Python.
+
+### Construction des API 
+pour des raisons de lisibilité les code python des différentes seront ajouter dans une section bien précise de ce dépôt mais les explications seront données ici.
+
+**Installer les dépendances Python**
+
+```bash
+# Installer les bibliothèques nécessaires
+pip3 install requests elasticsearch python-dotenv fastapi uvicorn --break-system-packages
+
+# Vérifier l'installation
+pip3 show elasticsearch | grep Version
+pip3 show fastapi | grep Version
+```
+
+**Pourquoi ces bibliothèques ?**
+- `requests` → pour appeler les APIs NVD, CISA, MITRE
+- `elasticsearch` → pour communiquer avec Elasticsearch depuis Python
+- `python-dotenv` → pour lire le fichier `.env` (clés API, mots de passe)
+- `fastapi` → pour créer l'API de recherche
+- `uvicorn` → pour faire tourner FastAPI
+
+Maintenant créons le fichier `.env` qui contient les variables de configuration :
+
+```bash
+cat > /home/ubuntu-server/memoire_ELK/collectors/.env << EOF
+ES_HOST=http://localhost:9200
+NVD_API_KEY=153e15f0-888a-416f-92a2-878281e1643a
+EOF
+
+cat /home/ubuntu-server/memoire_ELK/collectors/.env
+```
+
+**Pourquoi un fichier `.env` ?**
+
+C'est une bonne pratique de sécurité — on ne met jamais les clés API directement dans le code. Si vous partagez votre code sur GitHub par exemple, la clé NVD ne sera pas exposée car `.env` est toujours ajouté au `.gitignore`.
+
+```bash
+# Créer le .gitignore
+echo ".env" > /home/ubuntu-server/memoire_ELK/.gitignore
+```
+
+Dans un environnement de production, les credentials seraient gérés via un outil de gestion de secrets tel que HashiCorp Vault, remplaçant le fichier .env utilisé dans cette phase de développement.
