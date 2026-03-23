@@ -1233,3 +1233,670 @@ Ou via la navigation :
 ```
 
 <img width="1915" height="980" alt="image" src="https://github.com/user-attachments/assets/9ebd65ec-976a-4653-9695-f2c9fc7e8c05" />
+
+<img width="1915" height="980" alt="image" src="https://github.com/user-attachments/assets/57d9e3f3-4e72-45ea-8eac-3d3f47f3bb55" />
+
+**changez le filtre temporel :**
+
+1. Cliquez sur **"Last 15 minutes"** en haut à droite
+2. Sélectionnez **"Last 1 year"** ou **"Last 90 days"**
+3. Cliquez **Apply**
+
+<img width="1915" height="980" alt="image" src="https://github.com/user-attachments/assets/54c39dc8-9e47-4657-8c10-02a62a2489b1" />
+
+### alerting
+Ici l'alerting avec **Kibana** nous permettra de faire de la veille c'est à  dire que dès u'il y a un CVE publié nous seront informer.
+
+Vérifions d'abord si Kibana a la clé de chiffrement nécessaire :
+
+```bash
+docker exec kibana env | grep XPACK
+```
+dans notre cas non donc générons une clé
+```
+# Générer une clé de 32 bytes
+NEW_KEY=$(openssl rand -hex 32)
+echo "Clé générée : $NEW_KEY"
+
+# Ajouter la clé dans docker-compose.yml
+sed -i "s/- ELASTICSEARCH_HOSTS=http:\/\/elasticsearch:9200/- ELASTICSEARCH_HOSTS=http:\/\/elasticsearch:9200\n      - XPACK_ENCRYPTEDSAVEDOBJECTS_ENCRYPTIONKEY=$NEW_KEY\n      - XPACK_SECURITY_ENCRYPTIONKEY=$NEW_KEY\n      - XPACK_REPORTING_ENCRYPTIONKEY=$NEW_KEY\n      - SERVER_PUBLICBASEURL=http:\/\/192.168.1.65:5601/" docker-compose.yml
+
+# Vérifier
+grep -A 10 "kibana:" docker-compose.yml | head -12
+```
+
+La clé est bien ajoutée.Redémarrons Kibana :
+
+```bash
+cd /home/ubuntu-server/memoire_ELK
+docker compose restart kibana
+
+# Attendre le redémarrage
+sleep 60
+
+# Vérifier
+curl -s http://localhost:5601/api/status | python3 -m json.tool | grep -E "level|summary" | head -5
+```
+
+### création des règle d'alerting
+```
+# Règle 1 — CVE critiques CVSS >= 9.0
+curl -s -X POST "http://localhost:5601/api/alerting/rule" \
+  -H "kbn-xsrf: true" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "CVE Critiques CVSS >= 9.0",
+    "rule_type_id": ".es-query",
+    "consumer": "alerts",
+    "schedule": { "interval": "30m" },
+    "params": {
+      "index": ["threats-correlated"],
+      "timeField": "correlated_at",
+      "timeWindowSize": 30,
+      "timeWindowUnit": "m",
+      "thresholdComparator": ">",
+      "threshold": [0],
+      "size": 100,
+      "searchType": "esQuery",
+      "esQuery": "{\"query\":{\"bool\":{\"must\":[{\"range\":{\"cvss_score\":{\"gte\":9.0}}},{\"range\":{\"correlated_at\":{\"gte\":\"now-30m\"}}}]}}}"
+    },
+    "actions": []
+  }' | python3 -m json.tool | grep -E "\"id\"|\"name\"|message"
+
+# Règle 2 — Exploit activement exploité
+curl -s -X POST "http://localhost:5601/api/alerting/rule" \
+  -H "kbn-xsrf: true" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Nouveau exploit activement exploité",
+    "rule_type_id": ".es-query",
+    "consumer": "alerts",
+    "schedule": { "interval": "30m" },
+    "params": {
+      "index": ["threats-correlated"],
+      "timeField": "correlated_at",
+      "timeWindowSize": 30,
+      "timeWindowUnit": "m",
+      "thresholdComparator": ">",
+      "threshold": [0],
+      "size": 100,
+      "searchType": "esQuery",
+      "esQuery": "{\"query\":{\"bool\":{\"must\":[{\"term\":{\"actively_exploited\":true}},{\"range\":{\"correlated_at\":{\"gte\":\"now-30m\"}}}]}}}"
+    },
+    "actions": []
+  }' | python3 -m json.tool | grep -E "\"id\"|\"name\"|message"
+
+# Règle 3 — Ransomware détecté
+curl -s -X POST "http://localhost:5601/api/alerting/rule" \
+  -H "kbn-xsrf: true" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Vulnérabilité liée à un ransomware",
+    "rule_type_id": ".es-query",
+    "consumer": "alerts",
+    "schedule": { "interval": "30m" },
+    "params": {
+      "index": ["threats-correlated"],
+      "timeField": "correlated_at",
+      "timeWindowSize": 30,
+      "timeWindowUnit": "m",
+      "thresholdComparator": ">",
+      "threshold": [0],
+      "size": 100,
+      "searchType": "esQuery",
+      "esQuery": "{\"query\":{\"bool\":{\"must\":[{\"term\":{\"ransomware_related\":true}},{\"range\":{\"correlated_at\":{\"gte\":\"now-30m\"}}}]}}}"
+    },
+    "actions": []
+  }' | python3 -m json.tool | grep -E "\"id\"|\"name\"|message"
+```
+
+Bien sûr ! Voici chaque règle expliquée simplement :
+
+---
+
+**Règle 1 — CVE Critiques CVSS >= 9.0**
+
+```
+Condition : cvss_score >= 9.0
+            ET correlated_at dans les 30 dernières minutes
+Fréquence : vérification toutes les 30 minutes
+```
+
+**Ce qu'elle fait :**
+Toutes les 30 minutes Kibana regarde s'il y a de nouveaux CVE avec un score CVSS supérieur ou égal à 9.0 qui viennent d'être corrélés.
+
+**Pourquoi c'est important :**
+Un score de 9.0+ signifie que la vulnérabilité est **extrêmement dangereuse** — exploitable facilement depuis internet, sans compte, avec un impact total sur le système. Ces CVE nécessitent une action sous 24h.
+
+**Exemple concret :**
+```
+CVE-2026-22557 publié → CVSS 10.0
+Notre collecteur l'indexe à 10h30
+Kibana vérifie à 11h00 → détecte ce CVE
+→ Alerte déclenchée
+→ Analyste SOC notifié immédiatement
+```
+
+---
+
+**Règle 2 — Nouveau exploit activement exploité**
+
+```
+Condition : actively_exploited = true
+            ET correlated_at dans les 30 dernières minutes
+Fréquence : vérification toutes les 30 minutes
+```
+
+**Ce qu'elle fait :**
+Surveille si un CVE présent dans CISA KEV vient d'être corrélé dans notre système — c'est-à-dire un CVE confirmé utilisé par de vrais attaquants en ce moment.
+
+**Pourquoi c'est important :**
+Un CVE activement exploité est **immédiatement dangereux** même si son score CVSS n'est pas très élevé. Des attaquants l'utilisent **maintenant** dans de vraies attaques.
+
+**Exemple concret :**
+```
+CISA ajoute CVE-2026-3909 à son catalogue KEV
+Notre collecteur CISA récupère la mise à jour
+Le correlator marque ce CVE comme activement_exploited=true
+Kibana détecte → Alerte déclenchée
+→ Action requise avant le 27 mars (deadline CISA)
+```
+
+---
+
+**Règle 3 — Vulnérabilité liée à un ransomware**
+
+```
+Condition : ransomware_related = true
+            ET correlated_at dans les 30 dernières minutes
+Fréquence : vérification toutes les 30 minutes
+```
+
+**Ce qu'elle fait :**
+Surveille si un CVE lié à des campagnes ransomware vient d'être détecté. Ces CVE sont marqués `known_ransomware = Known` dans CISA KEV.
+
+**Pourquoi c'est important :**
+Les ransomwares sont les attaques les plus **dévastatrices** pour une organisation — chiffrement de toutes les données, rançon, arrêt de l'activité. Un CVE utilisé dans des campagnes ransomware doit être traité en **priorité absolue**.
+
+**Exemple concret :**
+```
+CVE-2026-1731 (BeyondTrust) → utilisé dans des campagnes ransomware
+CISA KEV : known_ransomware = "Known"
+Notre correlator : ransomware_related = true
+Kibana détecte → Alerte CRITIQUE déclenchée
+→ Patch immédiat obligatoire
+```
+
+---
+
+**Les 3 règles ensemble forment un système de surveillance à 3 niveaux :**
+
+```
+Règle 1 → surveillance par score technique (CVSS)
+           "C'est théoriquement très dangereux"
+
+Règle 2 → surveillance par exploitation réelle
+           "C'est activement utilisé par des attaquants"
+
+Règle 3 → surveillance par impact business
+           "C'est utilisé pour des ransomwares"
+```
+
+Il faut faire un redémarrage complet :
+
+```bash
+cd /home/ubuntu-server/memoire_ELK
+docker compose down && docker compose up -d
+
+# Attendre le démarrage complet
+sleep 90
+
+# Vérifier que la clé est bien chargée
+docker exec kibana env | grep XPACK
+```
+
+
+<img width="1915" height="980" alt="image" src="https://github.com/user-attachments/assets/2515f244-67d2-4fa2-8f90-99085092e88a" />
+
+
+mais nous avons un petite problème j'avais une ancienne clé et  les règle ont été crées avec celle-ci donc on reprends en supprimant l'ancienne clé
+Les 3 règles s'affichent mais elles sont en **Failed**. C'est le même problème qu'avant — les règles ont été créées avec l'ancienne clé. Il faut les supprimer et les recréer :
+
+```bash
+# Supprimer les 3 règles existantes
+for ID in dee04f53-5c02-41e3-a9f8-1e50543537ca 0f8154ba-f741-48af-a833-bf2768ac3d19 fdb1ec36-b1da-4532-8c0c-d0d3bfcf5a5e; do
+  curl -s -X DELETE "http://localhost:5601/api/alerting/rule/$ID" \
+    -H "kbn-xsrf: true"
+  echo "Supprimé : $ID"
+done
+```
+
+Puis recréez-les :
+
+```bash
+# Règle 1
+curl -s -X POST "http://localhost:5601/api/alerting/rule" \
+  -H "kbn-xsrf: true" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "CVE Critiques CVSS >= 9.0",
+    "rule_type_id": ".es-query",
+    "consumer": "alerts",
+    "schedule": { "interval": "30m" },
+    "params": {
+      "index": ["threats-correlated"],
+      "timeField": "correlated_at",
+      "timeWindowSize": 30,
+      "timeWindowUnit": "m",
+      "thresholdComparator": ">",
+      "threshold": [0],
+      "size": 100,
+      "searchType": "esQuery",
+      "esQuery": "{\"query\":{\"bool\":{\"must\":[{\"range\":{\"cvss_score\":{\"gte\":9.0}}},{\"range\":{\"correlated_at\":{\"gte\":\"now-30m\"}}}]}}}"
+    },
+    "actions": []
+  }' | python3 -m json.tool | grep -E "\"id\"|\"name\"|message"
+
+# Règle 2
+curl -s -X POST "http://localhost:5601/api/alerting/rule" \
+  -H "kbn-xsrf: true" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Nouveau exploit activement exploité",
+    "rule_type_id": ".es-query",
+    "consumer": "alerts",
+    "schedule": { "interval": "30m" },
+    "params": {
+      "index": ["threats-correlated"],
+      "timeField": "correlated_at",
+      "timeWindowSize": 30,
+      "timeWindowUnit": "m",
+      "thresholdComparator": ">",
+      "threshold": [0],
+      "size": 100,
+      "searchType": "esQuery",
+      "esQuery": "{\"query\":{\"bool\":{\"must\":[{\"term\":{\"actively_exploited\":true}},{\"range\":{\"correlated_at\":{\"gte\":\"now-30m\"}}}]}}}"
+    },
+    "actions": []
+  }' | python3 -m json.tool | grep -E "\"id\"|\"name\"|message"
+
+# Règle 3
+curl -s -X POST "http://localhost:5601/api/alerting/rule" \
+  -H "kbn-xsrf: true" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Vulnérabilité liée à un ransomware",
+    "rule_type_id": ".es-query",
+    "consumer": "alerts",
+    "schedule": { "interval": "30m" },
+    "params": {
+      "index": ["threats-correlated"],
+      "timeField": "correlated_at",
+      "timeWindowSize": 30,
+      "timeWindowUnit": "m",
+      "thresholdComparator": ">",
+      "threshold": [0],
+      "size": 100,
+      "searchType": "esQuery",
+      "esQuery": "{\"query\":{\"bool\":{\"must\":[{\"term\":{\"ransomware_related\":true}},{\"range\":{\"correlated_at\":{\"gte\":\"now-30m\"}}}]}}}"
+    },
+    "actions": []
+  }' | python3 -m json.tool | grep -E "\"id\"|\"name\"|message"
+```
+---
+voici le résult  t qui est un succès
+
+<img width="1915" height="980" alt="image" src="https://github.com/user-attachments/assets/e9975d18-c4b3-4777-9158-6a7872016d78" />
+
+### Recommendation
+Bonne question ! Les recommandations sont déjà dans nos données — elles sont générées automatiquement par le `correlator.py`. Il faut juste les afficher dans le dashboard.
+
+On va ajouter un **tableau** dans le dashboard qui affiche pour chaque CVE critique :
+
+```
+CVE ID | Score | Sévérité | Recommandation
+```
+
+Créons cette visualisation :
+
+```bash
+curl -s -X POST "http://localhost:5601/api/saved_objects/visualization" \
+  -H "kbn-xsrf: true" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "attributes": {
+      "title": "Recommandations correctives",
+      "visState": "{\"title\":\"Recommandations correctives\",\"type\":\"table\",\"params\":{\"perPage\":10,\"showPartialRows\":false,\"showMeticsAtAllLevels\":false,\"sort\":{\"columnIndex\":null,\"direction\":null},\"showTotal\":false,\"totalFunc\":\"sum\"},\"aggs\":[{\"id\":\"1\",\"enabled\":true,\"type\":\"count\",\"schema\":\"metric\",\"params\":{}},{\"id\":\"2\",\"enabled\":true,\"type\":\"terms\",\"schema\":\"bucket\",\"params\":{\"field\":\"cve_id\",\"size\":10,\"order\":\"desc\",\"orderBy\":\"1\",\"customLabel\":\"CVE ID\"}},{\"id\":\"3\",\"enabled\":true,\"type\":\"terms\",\"schema\":\"bucket\",\"params\":{\"field\":\"cvss_severity\",\"size\":5,\"order\":\"desc\",\"orderBy\":\"1\",\"customLabel\":\"Sévérité\"}},{\"id\":\"4\",\"enabled\":true,\"type\":\"terms\",\"schema\":\"bucket\",\"params\":{\"field\":\"recommendation\",\"size\":5,\"order\":\"desc\",\"orderBy\":\"1\",\"customLabel\":\"Recommandation\"}}]}",
+      "uiStateJSON": "{}",
+      "description": "",
+      "kibanaSavedObjectMeta": {
+        "searchSourceJSON": "{\"index\":\"e1283d7c-d53e-4540-8807-959dadd7c12a\",\"query\":{\"language\":\"kuery\",\"query\":\"priority_level: CRITICAL\"},\"filter\":[]}"
+      }
+    }
+  }' | python3 -m json.tool | grep -E "\"id\"|\"title\"|error"
+```
+La visualisation est créée ! Ajoutons-la au dashboard :
+
+```bash
+# Récupérer l'ID du dashboard
+curl -s "http://localhost:5601/api/saved_objects/_find?type=dashboard" \
+  -H "kbn-xsrf: true" | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+for obj in data['saved_objects']:
+    print(obj['id'], '→', obj['attributes']['title'])
+"
+```
+Parfait ! Ajoutons la visualisation recommandations au dashboard :
+
+```bash
+curl -s -X PUT "http://localhost:5601/api/saved_objects/dashboard/3dfdd1ac-783e-4cf3-ae23-766080da545b" \
+  -H "kbn-xsrf: true" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "attributes": {
+      "title": "Threat Intelligence Dashboard",
+      "description": "Système intelligent de gestion des menaces et vulnérabilités",
+      "panelsJSON": "[{\"version\":\"8.13.0\",\"type\":\"visualization\",\"gridData\":{\"x\":0,\"y\":0,\"w\":24,\"h\":8,\"i\":\"1\"},\"panelIndex\":\"1\",\"embeddableConfig\":{\"enhancements\":{}},\"panelRefName\":\"panel_1\"},{\"version\":\"8.13.0\",\"type\":\"visualization\",\"gridData\":{\"x\":24,\"y\":0,\"w\":24,\"h\":8,\"i\":\"2\"},\"panelIndex\":\"2\",\"embeddableConfig\":{\"enhancements\":{}},\"panelRefName\":\"panel_2\"},{\"version\":\"8.13.0\",\"type\":\"visualization\",\"gridData\":{\"x\":0,\"y\":8,\"w\":24,\"h\":8,\"i\":\"3\"},\"panelIndex\":\"3\",\"embeddableConfig\":{\"enhancements\":{}},\"panelRefName\":\"panel_3\"},{\"version\":\"8.13.0\",\"type\":\"visualization\",\"gridData\":{\"x\":24,\"y\":8,\"w\":24,\"h\":8,\"i\":\"4\"},\"panelIndex\":\"4\",\"embeddableConfig\":{\"enhancements\":{}},\"panelRefName\":\"panel_4\"},{\"version\":\"8.13.0\",\"type\":\"visualization\",\"gridData\":{\"x\":0,\"y\":16,\"w\":24,\"h\":8,\"i\":\"5\"},\"panelIndex\":\"5\",\"embeddableConfig\":{\"enhancements\":{}},\"panelRefName\":\"panel_5\"},{\"version\":\"8.13.0\",\"type\":\"visualization\",\"gridData\":{\"x\":24,\"y\":16,\"w\":24,\"h\":8,\"i\":\"6\"},\"panelIndex\":\"6\",\"embeddableConfig\":{\"enhancements\":{}},\"panelRefName\":\"panel_6\"},{\"version\":\"8.13.0\",\"type\":\"visualization\",\"gridData\":{\"x\":0,\"y\":24,\"w\":48,\"h\":12,\"i\":\"7\"},\"panelIndex\":\"7\",\"embeddableConfig\":{\"enhancements\":{}},\"panelRefName\":\"panel_7\"}]",
+      "timeRestore": false,
+      "kibanaSavedObjectMeta": {
+        "searchSourceJSON": "{\"query\":{\"language\":\"kuery\",\"query\":\"\"},\"filter\":[]}"
+      }
+    },
+    "references": [
+      {"name": "panel_1", "type": "visualization", "id": "96cd82ec-6b3b-4103-8408-01c1912d5cf8"},
+      {"name": "panel_2", "type": "visualization", "id": "0d6d3676-fa69-4489-af54-fcc1b2e060b3"},
+      {"name": "panel_3", "type": "visualization", "id": "f2c5e267-3415-4ace-897c-a0fc1a0a30b1"},
+      {"name": "panel_4", "type": "visualization", "id": "a992e847-48c9-476c-83e3-b9ca715ef154"},
+      {"name": "panel_5", "type": "visualization", "id": "a32d38e5-2af2-4562-b88c-7cca5a6d26c7"},
+      {"name": "panel_6", "type": "visualization", "id": "22d0c6d8-181c-40af-9fd5-d7f98919c714"},
+      {"name": "panel_7", "type": "visualization", "id": "f1963974-66b6-48c9-9639-7ae2e8149fa4"}
+    ]
+  }' | python3 -m json.tool | grep -E "\"id\"|\"title\"|error"
+```
+bon quelque problème mais j'ai réglé et j'ai trouver deux moyens décliner en option A et B
+
+**D'abord Option A — Kibana Discover (5 minutes)**
+
+Allez dans :
+```
+☰ Menu → Analytics → Discover
+```
+
+1. Sélectionnez le Data View **`threats-correlated`**
+2. Dans la barre de recherche tapez :
+```
+priority_level : "CRITICAL"
+```
+3. Dans le panneau gauche cherchez et ajoutez ces champs :
+   - `cve_id`
+   - `cvss_score`
+   - `priority_level`
+   - `recommendation`
+   - `actively_exploited`
+     
+<img width="1532" height="784" alt="image" src="https://github.com/user-attachments/assets/5fc02029-d227-4f10-b1a0-9e7e2311d5dc" />
+
+Kibana Discover fonctionne parfaitement ! 🎉
+
+**Ce qu'on voit :**
+- **169 CVE CRITICAL** filtrés
+- Tous les champs disponibles à gauche dont `recommendation`
+- Les données complètes de chaque CVE visibles
+
+**Pour voir la recommandation d'un CVE spécifique :**
+Cliquez sur la flèche **">"** à gauche d'un document pour voir tous ses champs dont la recommandation complète.
+
+---
+
+Maintenant passons à **l'Option B — corriger le mapping** pour afficher les recommandations directement dans le dashboard.
+
+On va modifier le `correlator.py` pour ajouter un champ `recommendation_short` de type `keyword` :
+
+```bash
+cd /home/ubuntu-server/memoire_ELK/collectors
+
+# Ajouter recommendation_short dans le mapping et la corrélation
+sed -i 's/"recommendation":      {"type": "text"}/"recommendation":      {"type": "text"},\n                "recommendation_short": {"type": "keyword"}/' correlator.py
+
+# Vérifier
+grep -A 2 "recommendation" correlator.py | head -10
+```
+
+Le mapping est mis à jour. Maintenant ajoutons le champ `recommendation_short` dans la génération du document corrélé :
+
+```bash
+# Ajouter recommendation_short dans le document corrélé
+sed -i 's/"recommendation":     generate_recommendation({/"recommendation_short": generate_recommendation({\n                    "actively_exploited": actively_exploited,\n                    "ransomware_related": ransomware_related,\n                    "patch_available":    src.get("patch_available", False),\n                    "due_date":           due_date,\n                    "required_action":    required_action,\n                    "cvss_severity":      src.get("cvss_severity")\n                })[:150],\n                "recommendation":     generate_recommendation({/' correlator.py
+
+# Vérifier
+grep -A 5 "recommendation_short" correlator.py | head -10
+```
+Parfait ! Maintenant supprimons l'ancien index et relançons la corrélation :
+
+```bash
+cd /home/ubuntu-server/memoire_ELK/collectors
+
+# Supprimer l'ancien index threats-correlated
+curl -s -X DELETE "http://localhost:9200/threats-correlated" | python3 -m json.tool
+
+# Relancer la corrélation
+python3 correlator.py
+```
+🎉 **1574 menaces corrélées avec le nouveau champ `recommendation_short` !**
+
+Maintenant créons la visualisation tableau avec ce nouveau champ :
+
+```bash
+curl -s -X PUT "http://localhost:5601/api/saved_objects/visualization/f1963974-66b6-48c9-9639-7ae2e8149fa4" \
+  -H "kbn-xsrf: true" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "attributes": {
+      "title": "Recommandations correctives",
+      "visState": "{\"title\":\"Recommandations correctives\",\"type\":\"table\",\"params\":{\"perPage\":10,\"showPartialRows\":false,\"showMeticsAtAllLevels\":false,\"sort\":{\"columnIndex\":null,\"direction\":null},\"showTotal\":false,\"totalFunc\":\"sum\"},\"aggs\":[{\"id\":\"1\",\"enabled\":true,\"type\":\"count\",\"schema\":\"metric\",\"params\":{}},{\"id\":\"2\",\"enabled\":true,\"type\":\"terms\",\"schema\":\"bucket\",\"params\":{\"field\":\"cve_id\",\"size\":10,\"order\":\"desc\",\"orderBy\":\"1\",\"customLabel\":\"CVE ID\"}},{\"id\":\"3\",\"enabled\":true,\"type\":\"terms\",\"schema\":\"bucket\",\"params\":{\"field\":\"cvss_severity\",\"size\":5,\"order\":\"desc\",\"orderBy\":\"1\",\"customLabel\":\"Sévérité\"}},{\"id\":\"4\",\"enabled\":true,\"type\":\"terms\",\"schema\":\"bucket\",\"params\":{\"field\":\"recommendation_short\",\"size\":5,\"order\":\"desc\",\"orderBy\":\"1\",\"customLabel\":\"Recommandation\"}}]}",
+      "uiStateJSON": "{}",
+      "description": "",
+      "kibanaSavedObjectMeta": {
+        "searchSourceJSON": "{\"index\":\"e1283d7c-d53e-4540-8807-959dadd7c12a\",\"query\":{\"language\":\"kuery\",\"query\":\"priority_level: CRITICAL\"},\"filter\":[]}"
+      }
+    }
+  }' | python3 -m json.tool | grep -E "\"id\"|\"title\"|error"
+```
+Puis repartons sur kibana dans la section **dashboard**
+
+<img width="1915" height="980" alt="image" src="https://github.com/user-attachments/assets/55d80ca3-ba76-47d3-bc49-2326aba97a46" />
+
+<img width="1915" height="980" alt="image" src="https://github.com/user-attachments/assets/060b34fd-4712-4a2d-ab38-61d6f8541841" />
+
+### TLS
+
+Parfait ! Commençons par générer les certificats SSL avec openssl :
+
+**Pourquoi openssl et pas elasticsearch-certutil ?**
+
+La dernière fois on a eu des problèmes avec `elasticsearch-certutil`. OpenSSL est plus simple et directement disponible sur Ubuntu.
+
+```bash
+cd /home/ubuntu-server/memoire_ELK/certs
+
+# Générer le certificat auto-signé
+openssl req -x509 -newkey rsa:4096 \
+  -keyout elasticsearch.key \
+  -out elasticsearch.crt \
+  -days 365 -nodes \
+  -subj "/CN=elasticsearch/O=memoire_ELK/C=FR" \
+  -addext "subjectAltName=DNS:elasticsearch,DNS:localhost,IP:127.0.0.1,IP:192.168.1.65"
+
+# Vérifier
+ls -la /home/ubuntu-server/memoire_ELK/certs/
+```
+
+**Explication des paramètres :**
+- `rsa:4096` → clé de 4096 bits — très sécurisée
+- `-days 365` → valide 1 an
+- `-nodes` → pas de mot de passe sur la clé
+- `subjectAltName` → les adresses autorisées à utiliser ce certificat
+Les certificats sont générés ! Maintenant mettons à jour le `docker-compose.yml` pour activer TLS :
+
+```bash
+cd /home/ubuntu-server/memoire_ELK
+
+cat > docker-compose.yml << 'EOF'
+services:
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.13.0
+    container_name: elasticsearch
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=true
+      - xpack.security.http.ssl.enabled=true
+      - xpack.security.http.ssl.key=/usr/share/elasticsearch/config/certs/elasticsearch.key
+      - xpack.security.http.ssl.certificate=/usr/share/elasticsearch/config/certs/elasticsearch.crt
+      - xpack.security.transport.ssl.enabled=true
+      - xpack.security.transport.ssl.key=/usr/share/elasticsearch/config/certs/elasticsearch.key
+      - xpack.security.transport.ssl.certificate=/usr/share/elasticsearch/config/certs/elasticsearch.crt
+      - xpack.security.transport.ssl.verification_mode=none
+      - ELASTIC_PASSWORD=elastic123
+      - ES_JAVA_OPTS=-Xms1g -Xmx1g
+    ports:
+      - "9200:9200"
+    volumes:
+      - es_data:/usr/share/elasticsearch/data
+      - ./certs:/usr/share/elasticsearch/config/certs:ro
+    networks:
+      - elk-net
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.13.0
+    container_name: kibana
+    ports:
+      - "5601:5601"
+    environment:
+      - ELASTICSEARCH_HOSTS=https://elasticsearch:9200
+      - ELASTICSEARCH_SERVICEACCOUNTTOKEN=
+      - ELASTICSEARCH_SSL_VERIFICATIONMODE=none
+      - SERVER_PUBLICBASEURL=http://192.168.1.65:5601
+      - XPACK_ENCRYPTEDSAVEDOBJECTS_ENCRYPTIONKEY=8a5127e0d5319a324d76166d9de66498b22946f69f8bda593ea6a75a214772fa
+      - XPACK_SECURITY_ENCRYPTIONKEY=8a5127e0d5319a324d76166d9de66498b22946f69f8bda593ea6a75a214772fa
+      - XPACK_REPORTING_ENCRYPTIONKEY=8a5127e0d5319a324d76166d9de66498b22946f69f8bda593ea6a75a214772fa
+    depends_on:
+      - elasticsearch
+    networks:
+      - elk-net
+
+  logstash:
+    image: docker.elastic.co/logstash/logstash:8.13.0
+    container_name: logstash
+    ports:Kibana server is not ready yet.
+      - "5044:5044"
+      - "5514:5514/udp"
+      - "9600:9600"
+    volumes:
+      - ./logstash/pipeline:/usr/share/logstash/pipeline:ro
+      - ./logstash/config/logstash.yml:/usr/share/logstash/config/logstash.yml:ro
+    environment:
+      - LS_JAVA_OPTS=-Xms512m -Xmx512m
+    depends_on:
+      - elasticsearch
+    networks:
+      - elk-net
+
+volumes:
+  es_data:
+
+networks:
+  elk-net:
+    driver: bridge
+EOF
+
+# Vérifier
+grep -E "ssl|SSL|security|SECURITY" docker-compose.yml
+```
+Maintenant démarrons la stack avec TLS :
+
+```bash
+cd /home/ubuntu-server/memoire_ELK
+
+# Arrêt complet et redémarrage
+docker compose down && docker compose up -d
+
+# Attendre le démarrage
+sleep 90
+
+# Tester Elasticsearch avec TLS
+curl -sk https://localhost:9200 -u elastic:elastic123 | python3 -m json.tool | grep -E "name|number"
+```
+Elasticsearch fonctionne avec TLS ! Le message `received plaintext http traffic on an https channel` signifie que Kibana essaie encore de se connecter en HTTP au lieu de HTTPS — c'est normal, il faut lui générer un token de service.
+
+```bash
+# Créer le token de service pour Kibana
+curl -sk -X POST "https://localhost:9200/_security/service/elastic/kibana/credential/token/kibana_token" \
+  -u elastic:elastic123 | python3 -m json.tool | grep value
+```
+
+Partagez le token — on va l'ajouter dans le docker-compose.yml !!
+Parfait ! Ajoutons le token dans le docker-compose.yml :
+
+```bash
+cd /home/ubuntu-server/memoire_ELK
+
+# Ajouter le token Kibana
+sed -i 's/- ELASTICSEARCH_SERVICEACCOUNTTOKEN=/- ELASTICSEARCH_SERVICEACCOUNTTOKEN=AAEAAWVsYXN0aWMva2liYW5hL2tpYmFuYV90b2tlbjpCQ3JObjFWcFMtQ05wZWdteFpTYlNn/' docker-compose.yml
+
+# Vérifier
+Partagez le résultat !
+grep "SERVICEACCOUNTTOKEN" docker-compose.yml
+```
+Redémarrons Kibana :
+
+```bash
+cd /home/ubuntu-server/memoire_ELK
+docker compose restart kibana
+
+# Attendre le démarrage
+sleep 90
+
+# Vérifier les logs Kibana
+docker logs kibana 2>&1 | tail -10
+```
+Le problème est clair — Kibana ne s'authentifie pas correctement. Le token n'est pas pris en compte. Vérifions :
+
+```bash
+docker exec kibana env | grep -E "SERVICEACCOUNT|ELASTICSEARCH"
+```
+
+Puis ajoute le token dan le .env
+Le token est vide dans le fichier. Corrigeons manuellement avec nano :
+
+```bash
+nano /home/ubuntu-server/memoire_ELK/docker-compose.yml
+```
+
+Trouvez la ligne :
+```
+- ELASTICSEARCH_SERVICEACCOUNTTOKEN=
+```
+
+Et remplacez-la par :
+```
+- ELASTICSEARCH_SERVICEACCOUNTTOKEN=AAEAAWVsYXN0aWMva2liYW5hL2tpYmFuYV90b2tlbjpCQ3JObjFWcFMtQ05wZWdteFpTYlNn
+```
+
+Sauvegardez avec `Ctrl+O` puis `Ctrl+X`.
+
+Ensuite :
+```bash
+# Vérifier
+grep "SERVICEACCOUNTTOKEN" /home/ubuntu-server/memoire_ELK/docker-compose.yml
+
+# Redémarrer
+docker compose down && docker compose up -d
+sleep 90
+
+# Tester
+curl -sk https://localhost:9200 -u elastic:elastic123 | python3 -m json.tool | grep name
+```
+
+Partagez le résultat !
