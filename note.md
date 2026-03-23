@@ -798,5 +798,438 @@ sudo systemctl enable threat-api
 sudo systemctl start threat-api
 sudo systemctl status threat-api
 ```
+## Kibana
 
-Partagez le résultat !
+**Il reste :**
+- Configuration des Data Views dans Kibana
+- Création du dashboard
+- Alerting Kibana
+- TLS + Authentification
+
+Ouvrez Kibana dans votre navigateur :
+
+```
+http://192.168.1.65:5601
+```
+
+Cliquez sur **"Explore on my own"** puis naviguez vers :
+
+```
+☰ Menu → Stack Management → Data Views → Create data view
+```
+
+On va créer les 4 Data Views. Commencez par le premier :
+
+**Data View 1 :**
+- **Name** → `threats-correlated`
+- **Index pattern** → `threats-correlated`
+- **Timestamp** → `correlated_at`
+- Cliquez **Save data view to Kibana**
+ 
+**correlated_at** = le moment exact où notre système a enregistré, analysé et enrichi le CVE.
+
+création du premier index
+
+<img width="1920" height="976" alt="image" src="https://github.com/user-attachments/assets/315dbc67-ad51-439c-b8cb-b000869333d6" />
+
+
+<img width="1920" height="976" alt="image" src="https://github.com/user-attachments/assets/712a5d04-34d0-4680-83b2-b10fbd54db9c" />
+
+---
+
+Les 4 Data Views sont créés ! Voici le rôle de chacun :
+
+**`threats-correlated`** (Default)
+C'est le plus important — il pointe vers l'index qui contient les CVE enrichis par notre moteur de corrélation. C'est lui qu'on utilisera principalement dans le dashboard pour afficher les menaces avec leur score de priorité, les recommandations et les tactiques MITRE.
+
+**`exploits-cisa-kev`**
+Pointe vers les exploits activement utilisés par les attaquants. Permet de visualiser dans Kibana quels nouveaux exploits ont été ajoutés au catalogue CISA et quand ils ont été détectés.
+
+**`mitre-attack`**
+Pointe vers les techniques d'attaque MITRE ATT&CK. Permet de rechercher et visualiser les tactiques et techniques associées aux vulnérabilités détectées.
+
+**`vulnerabilities-nvd`**
+Pointe vers les CVE bruts collectés depuis NVD. Utile pour la timeline — voir combien de nouvelles vulnérabilités sont publiées chaque jour dans le monde.
+
+---
+
+**En résumé :**
+
+| Data View | Répond à la question |
+|-----------|---------------------|
+| `threats-correlated` | Quelles menaces traiter en priorité ? |
+| `exploits-cisa-kev` | Quelles vulnérabilités sont exploitées maintenant ? |
+| `mitre-attack` | Comment les attaquants procèdent-ils ? |
+| `vulnerabilities-nvd` | Combien de nouvelles CVE publiées aujourd'hui ? |
+
+
+<img width="1920" height="994" alt="image" src="https://github.com/user-attachments/assets/b9f3cd4d-2058-4d00-ba3f-214ab0c0224c" />
+
+### dashboard
+Naviguez vers :
+
+```
+☰ Menu → Analytics → Dashboard → Create dashboard
+```
+
+Vous devriez voir une page vide avec **"This dashboard is empty. Let's fill it up!"**
+
+Faites une capture d'écran pour confirmer, puis on va créer les visualisations une par une via l'API Kibana — beaucoup plus rapide qu'à la main !
+<img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/496bd3f9-4572-4315-a731-96fcab94ac4d" />
+
+passons à la récupréation des IDs
+```bash
+curl -s "http://localhost:5601/api/saved_objects/_find?type=index-pattern" \
+  -H "kbn-xsrf: true" | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+for obj in data['saved_objects']:
+    print(obj['id'], '→', obj['attributes']['title'])
+"
+```
+
+**explication**
+Bonne question ! Voici pourquoi on récupère ces IDs.
+
+---
+
+**Le problème :**
+
+Quand on crée une visualisation Kibana via l'API, on doit lui dire **quelle source de données utiliser**. On ne peut pas juste écrire le nom `threats-correlated` — Kibana utilise un **ID unique** interne pour identifier chaque Data View.
+
+**Exemple :**
+```
+Ce qu'on voudrait écrire :
+"index": "threats-correlated"   ← NE FONCTIONNE PAS
+
+Ce que Kibana attend :
+"index": "22038621-ad02-4086-a738-3859e6f26cca"   ← ID interne
+```
+
+---
+
+**Pourquoi Kibana utilise des IDs et pas des noms ?**
+
+Parce que deux Data Views pourraient avoir le même nom mais des configurations différentes. L'ID est **unique et garanti** — le nom ne l'est pas.
+
+---
+
+**Analogie simple :**
+
+```
+Nom    = "Jean Dupont"   → il peut y en avoir plusieurs
+ID     = "CNI: 123456"   → unique dans tout le système
+```
+
+---
+
+**Ce qu'on va faire avec ces IDs :**
+
+```
+curl récupère les IDs
+        ↓
+On note l'ID de threats-correlated
+        ↓
+On l'utilise dans la création des visualisations
+        ↓
+Kibana sait exactement quelle source utiliser
+```
+```
+# Visualisation 1 — Métriques clés
+curl -s -X POST "http://localhost:5601/api/saved_objects/visualization" \
+  -H "kbn-xsrf: true" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "attributes": {
+      "title": "Métriques clés",
+      "visState": "{\"title\":\"Métriques clés\",\"type\":\"metric\",\"params\":{\"addTooltip\":true,\"addLegend\":false,\"type\":\"metric\",\"metric\":{\"percentageMode\":false,\"useRanges\":false,\"colorSchema\":\"Green to Red\",\"metricColorMode\":\"None\",\"colorsRange\":[{\"from\":0,\"to\":10000}],\"labels\":{\"show\":true},\"invertColors\":false,\"style\":{\"bgFill\":\"#000\",\"bgColor\":false,\"labelColor\":false,\"subText\":\"\",\"fontSize\":60}}},\"aggs\":[{\"id\":\"1\",\"enabled\":true,\"type\":\"count\",\"schema\":\"metric\",\"params\":{\"customLabel\":\"Total CVE\"}}]}",
+      "uiStateJSON": "{}",
+      "description": "",
+      "kibanaSavedObjectMeta": {
+        "searchSourceJSON": "{\"index\":\"e1283d7c-d53e-4540-8807-959dadd7c12a\",\"query\":{\"language\":\"kuery\",\"query\":\"\"},\"filter\":[]}"
+      }
+    }
+  }' | python3 -m json.tool | grep -E "\"id\"|\"title\"|error"
+
+# Visualisation 2 — Répartition par sévérité
+curl -s -X POST "http://localhost:5601/api/saved_objects/visualization" \
+  -H "kbn-xsrf: true" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "attributes": {
+      "title": "Répartition par sévérité",
+      "visState": "{\"title\":\"Répartition par sévérité\",\"type\":\"pie\",\"params\":{\"type\":\"pie\",\"addTooltip\":true,\"addLegend\":true,\"legendPosition\":\"right\",\"isDonut\":true},\"aggs\":[{\"id\":\"1\",\"enabled\":true,\"type\":\"count\",\"schema\":\"metric\",\"params\":{}},{\"id\":\"2\",\"enabled\":true,\"type\":\"terms\",\"schema\":\"segment\",\"params\":{\"field\":\"cvss_severity\",\"size\":10,\"order\":\"desc\",\"orderBy\":\"1\"}}]}",
+      "uiStateJSON": "{}",
+      "description": "",
+      "kibanaSavedObjectMeta": {
+        "searchSourceJSON": "{\"index\":\"e1283d7c-d53e-4540-8807-959dadd7c12a\",\"query\":{\"language\":\"kuery\",\"query\":\"\"},\"filter\":[]}"
+      }
+    }
+  }' | python3 -m json.tool | grep -E "\"id\"|\"title\"|error"
+
+# Visualisation 3 — CVE par priorité
+curl -s -X POST "http://localhost:5601/api/saved_objects/visualization" \
+  -H "kbn-xsrf: true" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "attributes": {
+      "title": "CVE par niveau de priorité",
+      "visState": "{\"title\":\"CVE par niveau de priorité\",\"type\":\"pie\",\"params\":{\"type\":\"pie\",\"addTooltip\":true,\"addLegend\":true,\"legendPosition\":\"right\",\"isDonut\":false},\"aggs\":[{\"id\":\"1\",\"enabled\":true,\"type\":\"count\",\"schema\":\"metric\",\"params\":{}},{\"id\":\"2\",\"enabled\":true,\"type\":\"terms\",\"schema\":\"segment\",\"params\":{\"field\":\"priority_level\",\"size\":10,\"order\":\"desc\",\"orderBy\":\"1\"}}]}",
+      "uiStateJSON": "{}",
+      "description": "",
+      "kibanaSavedObjectMeta": {
+        "searchSourceJSON": "{\"index\":\"e1283d7c-d53e-4540-8807-959dadd7c12a\",\"query\":{\"language\":\"kuery\",\"query\":\"\"},\"filter\":[]}"
+      }
+    }
+  }' | python3 -m json.tool | grep -E "\"id\"|\"title\"|error"
+
+# Visualisation 4 — Top vendeurs
+curl -s -X POST "http://localhost:5601/api/saved_objects/visualization" \
+  -H "kbn-xsrf: true" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "attributes": {
+      "title": "Top vendeurs affectés",
+      "visState": "{\"title\":\"Top vendeurs affectés\",\"type\":\"horizontal_bar\",\"params\":{\"type\":\"histogram\",\"grid\":{\"categoryLines\":false},\"categoryAxes\":[{\"id\":\"CategoryAxis-1\",\"type\":\"category\",\"position\":\"left\",\"show\":true,\"style\":{},\"scale\":{\"type\":\"linear\"},\"labels\":{\"show\":true,\"truncate\":100},\"title\":{}}],\"valueAxes\":[{\"id\":\"ValueAxis-1\",\"name\":\"LeftAxis-1\",\"type\":\"value\",\"position\":\"bottom\",\"show\":true,\"style\":{},\"scale\":{\"type\":\"linear\",\"mode\":\"normal\"},\"labels\":{\"show\":true,\"rotate\":0,\"filter\":false,\"truncate\":100},\"title\":{\"text\":\"Count\"}}],\"seriesParams\":[{\"show\":true,\"type\":\"histogram\",\"mode\":\"stacked\",\"data\":{\"label\":\"Count\",\"id\":\"1\"},\"valueAxis\":\"ValueAxis-1\",\"drawLinesBetweenPoints\":true,\"lineWidth\":2,\"showCircles\":true}],\"addTooltip\":true,\"addLegend\":true,\"legendPosition\":\"right\",\"times\":[],\"addTimeMarker\":false},\"aggs\":[{\"id\":\"1\",\"enabled\":true,\"type\":\"count\",\"schema\":\"metric\",\"params\":{}},{\"id\":\"2\",\"enabled\":true,\"type\":\"terms\",\"schema\":\"segment\",\"params\":{\"field\":\"vendor\",\"size\":10,\"order\":\"desc\",\"orderBy\":\"1\"}}]}",
+      "uiStateJSON": "{}",
+      "description": "",
+      "kibanaSavedObjectMeta": {
+        "searchSourceJSON": "{\"index\":\"8e6ea60a-5d2e-4cae-88ee-837e42db7338\",\"query\":{\"language\":\"kuery\",\"query\":\"\"},\"filter\":[]}"
+      }
+    }
+  }' | python3 -m json.tool | grep -E "\"id\"|\"title\"|error"
+
+# Visualisation 5 — Exploits actifs
+curl -s -X POST "http://localhost:5601/api/saved_objects/visualization" \
+  -H "kbn-xsrf: true" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "attributes": {
+      "title": "Exploits actifs et ransomware",
+      "visState": "{\"title\":\"Exploits actifs et ransomware\",\"type\":\"metric\",\"params\":{\"addTooltip\":true,\"addLegend\":false,\"type\":\"metric\",\"metric\":{\"percentageMode\":false,\"useRanges\":true,\"colorSchema\":\"Green to Red\",\"metricColorMode\":\"Background\",\"colorsRange\":[{\"from\":0,\"to\":5},{\"from\":5,\"to\":20},{\"from\":20,\"to\":1000}],\"labels\":{\"show\":true},\"invertColors\":false,\"style\":{\"bgFill\":\"#000\",\"bgColor\":true,\"labelColor\":false,\"subText\":\"\",\"fontSize\":40}}},\"aggs\":[{\"id\":\"1\",\"enabled\":true,\"type\":\"count\",\"schema\":\"metric\",\"params\":{\"customLabel\":\"Exploits actifs\"}}]}",
+      "uiStateJSON": "{}",
+      "description": "",
+      "kibanaSavedObjectMeta": {
+        "searchSourceJSON": "{\"index\":\"e1283d7c-d53e-4540-8807-959dadd7c12a\",\"query\":{\"language\":\"kuery\",\"query\":\"actively_exploited: true\"},\"filter\":[]}"
+      }
+    }
+  }' | python3 -m json.tool | grep -E "\"id\"|\"title\"|error"
+
+# Visualisation 6 — Timeline
+curl -s -X POST "http://localhost:5601/api/saved_objects/visualization" \
+  -H "kbn-xsrf: true" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "attributes": {
+      "title": "Timeline des CVE publiés",
+      "visState": "{\"title\":\"Timeline des CVE publiés\",\"type\":\"histogram\",\"params\":{\"type\":\"histogram\",\"grid\":{\"categoryLines\":false},\"categoryAxes\":[{\"id\":\"CategoryAxis-1\",\"type\":\"category\",\"position\":\"bottom\",\"show\":true,\"style\":{},\"scale\":{\"type\":\"linear\"},\"labels\":{\"show\":true,\"filter\":true,\"truncate\":100},\"title\":{}}],\"valueAxes\":[{\"id\":\"ValueAxis-1\",\"name\":\"LeftAxis-1\",\"type\":\"value\",\"position\":\"left\",\"show\":true,\"style\":{},\"scale\":{\"type\":\"linear\",\"mode\":\"normal\"},\"labels\":{\"show\":true,\"rotate\":0,\"filter\":false,\"truncate\":100},\"title\":{\"text\":\"Nombre de CVE\"}}],\"seriesParams\":[{\"show\":true,\"type\":\"histogram\",\"mode\":\"stacked\",\"data\":{\"label\":\"Nombre de CVE\",\"id\":\"1\"},\"valueAxis\":\"ValueAxis-1\",\"drawLinesBetweenPoints\":true,\"lineWidth\":2,\"showCircles\":true}],\"addTooltip\":true,\"addLegend\":true,\"legendPosition\":\"right\",\"times\":[],\"addTimeMarker\":false},\"aggs\":[{\"id\":\"1\",\"enabled\":true,\"type\":\"count\",\"schema\":\"metric\",\"params\":{}},{\"id\":\"2\",\"enabled\":true,\"type\":\"date_histogram\",\"schema\":\"segment\",\"params\":{\"field\":\"published\",\"useNormalizedEsInterval\":true,\"scaleMetricValues\":false,\"interval\":\"auto\",\"drop_partials\":false,\"min_doc_count\":1,\"extended_bounds\":{}}}]}",
+      "uiStateJSON": "{}",
+      "description": "",
+      "kibanaSavedObjectMeta": {
+        "searchSourceJSON": "{\"index\":\"8e6ea60a-5d2e-4cae-88ee-837e42db7338\",\"query\":{\"language\":\"kuery\",\"query\":\"\"},\"filter\":[]}"
+      }
+    }
+  }' | python3 -m json.tool | grep -E "\"id\"|\"title\"|error"
+```
+
+Bien sûr ! Voici chaque visualisation expliquée simplement :
+
+---
+
+**Visualisation 1 — Métriques clés**
+```
+Type : Metric (grand chiffre)
+Source : threats-correlated
+```
+Affiche le **nombre total de CVE** dans la base en gros chiffre. C'est la première chose qu'un analyste voit en ouvrant le dashboard — combien de menaces sont surveillées en ce moment.
+
+---
+
+**Visualisation 2 — Répartition par sévérité**
+```
+Type : Donut chart (anneau)
+Source : threats-correlated
+Champ : cvss_severity
+```
+Montre la **proportion** de CVE par niveau de sévérité CVSS. D'un coup d'œil l'analyste voit si la majorité des menaces sont critiques ou modérées.
+```
+CRITICAL 11% | HIGH 39% | MEDIUM 46% | LOW 4%
+```
+
+---
+
+**Visualisation 3 — CVE par niveau de priorité**
+```
+Type : Pie chart (camembert)
+Source : threats-correlated
+Champ : priority_level
+```
+Différent de la sévérité — c'est la **priorité calculée par notre moteur de corrélation**. Un CVE avec CVSS 8.8 activement exploité aura une priorité CRITICAL même si sa sévérité brute est HIGH.
+
+---
+
+**Visualisation 4 — Top vendeurs affectés**
+```
+Type : Barres horizontales
+Source : vulnerabilities-nvd
+Champ : vendor
+```
+Affiche les **10 vendeurs** ayant le plus de vulnérabilités publiées. Permet de savoir rapidement si Microsoft, Cisco ou Apache concentrent les risques — utile pour décider quels patches prioriser.
+
+---
+
+**Visualisation 5 — Exploits actifs et ransomware**
+```
+Type : Metric avec couleur
+Source : threats-correlated
+Filtre : actively_exploited = true
+```
+Affiche uniquement les CVE **confirmés exploités** par des attaquants en ce moment. Le fond change de couleur selon le niveau de danger — vert si peu, orange si moyen, rouge si beaucoup. C'est l'indicateur le plus urgent pour un analyste SOC.
+
+---
+
+**Visualisation 6 — Timeline des CVE publiés**
+```
+Type : Histogramme (barres dans le temps)
+Source : vulnerabilities-nvd
+Champ : published
+```
+Montre l'**évolution du nombre de CVE publiés** dans le temps. Permet de voir les pics — par exemple après une grande conférence de sécurité ou lors d'une crise comme Log4Shell.
+
+---
+
+**Vue d'ensemble du dashboard :**
+
+```
+┌─────────────────────┬─────────────────────┐
+│   Métriques clés    │ Répartition sévérité │
+│     1431 CVE        │   (donut chart)      │
+├─────────────────────┼─────────────────────┤
+│  Top vendeurs       │  CVE par priorité    │
+│  (barres horiz.)    │   (camembert)        │
+├─────────────────────┼─────────────────────┤
+│  Exploits actifs    │  Timeline CVE        │
+│     0 (vert)        │  (histogramme)       │
+└─────────────────────┴─────────────────────┘
+```
+```
+curl -s -X POST "http://localhost:5601/api/saved_objects/dashboard" \
+  -H "kbn-xsrf: true" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "attributes": {
+      "title": "Threat Intelligence Dashboard",
+      "description": "Système intelligent de gestion des menaces et vulnérabilités",
+      "panelsJSON": "[{\"version\":\"8.13.0\",\"type\":\"visualization\",\"gridData\":{\"x\":0,\"y\":0,\"w\":24,\"h\":8,\"i\":\"1\"},\"panelIndex\":\"1\",\"embeddableConfig\":{\"enhancements\":{}},\"panelRefName\":\"panel_1\"},{\"version\":\"8.13.0\",\"type\":\"visualization\",\"gridData\":{\"x\":24,\"y\":0,\"w\":24,\"h\":8,\"i\":\"2\"},\"panelIndex\":\"2\",\"embeddableConfig\":{\"enhancements\":{}},\"panelRefName\":\"panel_2\"},{\"version\":\"8.13.0\",\"type\":\"visualization\",\"gridData\":{\"x\":0,\"y\":8,\"w\":24,\"h\":8,\"i\":\"3\"},\"panelIndex\":\"3\",\"embeddableConfig\":{\"enhancements\":{}},\"panelRefName\":\"panel_3\"},{\"version\":\"8.13.0\",\"type\":\"visualization\",\"gridData\":{\"x\":24,\"y\":8,\"w\":24,\"h\":8,\"i\":\"4\"},\"panelIndex\":\"4\",\"embeddableConfig\":{\"enhancements\":{}},\"panelRefName\":\"panel_4\"},{\"version\":\"8.13.0\",\"type\":\"visualization\",\"gridData\":{\"x\":0,\"y\":16,\"w\":24,\"h\":8,\"i\":\"5\"},\"panelIndex\":\"5\",\"embeddableConfig\":{\"enhancements\":{}},\"panelRefName\":\"panel_5\"},{\"version\":\"8.13.0\",\"type\":\"visualization\",\"gridData\":{\"x\":24,\"y\":16,\"w\":24,\"h\":8,\"i\":\"6\"},\"panelIndex\":\"6\",\"embeddableConfig\":{\"enhancements\":{}},\"panelRefName\":\"panel_6\"}]",
+      "timeRestore": false,
+      "kibanaSavedObjectMeta": {
+        "searchSourceJSON": "{\"query\":{\"language\":\"kuery\",\"query\":\"\"},\"filter\":[]}"
+      }
+    },
+    "references": [
+      {"name": "panel_1", "type": "visualization", "id": "96cd82ec-6b3b-4103-8408-01c1912d5cf8"},
+      {"name": "panel_2", "type": "visualization", "id": "0d6d3676-fa69-4489-af54-fcc1b2e060b3"},
+      {"name": "panel_3", "type": "visualization", "id": "f2c5e267-3415-4ace-897c-a0fc1a0a30b1"},
+      {"name": "panel_4", "type": "visualization", "id": "a992e847-48c9-476c-83e3-b9ca715ef154"},
+      {"name": "panel_5", "type": "visualization", "id": "a32d38e5-2af2-4562-b88c-7cca5a6d26c7"},
+      {"name": "panel_6", "type": "visualization", "id": "22d0c6d8-181c-40af-9fd5-d7f98919c714"}
+    ]
+  }' | python3 -m json.tool | grep -E "\"id\"|\"title\"|error"
+```
+Bien sûr ! Voici ce que cette commande fait étape par étape.
+
+---
+
+**C'est quoi cette commande ?**
+
+On envoie une requête POST à l'API Kibana pour créer un dashboard qui **assemble** les 6 visualisations déjà créées.
+
+---
+
+**1. L'URL et les en-têtes**
+```bash
+curl -s -X POST "http://localhost:5601/api/saved_objects/dashboard"
+  -H "kbn-xsrf: true"
+  -H "Content-Type: application/json"
+```
+- `POST` → on crée un nouvel objet
+- `/api/saved_objects/dashboard` → on crée un dashboard
+- `kbn-xsrf: true` → protection sécurité Kibana obligatoire
+- `Content-Type: application/json` → on envoie du JSON
+
+---
+
+**2. Le titre et la description**
+```json
+"title": "Threat Intelligence Dashboard",
+"description": "Système intelligent de gestion des menaces"
+```
+C'est ce qui apparaît dans la liste des dashboards dans Kibana.
+
+---
+
+**3. panelsJSON — la grille du dashboard**
+```json
+"gridData": {"x":0, "y":0, "w":24, "h":8}
+```
+Définit la position de chaque visualisation sur la grille Kibana :
+```
+x = position horizontale (0 = gauche, 24 = milieu, 48 = droite)
+y = position verticale   (0 = haut, 8 = deuxième rangée...)
+w = largeur              (24 = demi-écran, 48 = plein écran)
+h = hauteur              (8 = hauteur standard)
+```
+
+Notre grille ressemble à ça :
+```
+x=0  y=0  w=24 → Métriques clés      (gauche haut)
+x=24 y=0  w=24 → Répartition sévérité (droite haut)
+x=0  y=8  w=24 → Top vendeurs         (gauche milieu)
+x=24 y=8  w=24 → CVE par priorité     (droite milieu)
+x=0  y=16 w=24 → Exploits actifs      (gauche bas)
+x=24 y=16 w=24 → Timeline CVE         (droite bas)
+```
+
+---
+
+**4. Les références — le lien entre panels et visualisations**
+```json
+"references": [
+  {"name": "panel_1", "type": "visualization", "id": "96cd82ec..."},
+  {"name": "panel_2", "type": "visualization", "id": "0d6d3676..."},
+  ...
+]
+```
+C'est ici qu'on fait le lien entre :
+- `panel_1` dans `panelsJSON` → visualisation `96cd82ec` (Métriques clés)
+- `panel_2` dans `panelsJSON` → visualisation `0d6d3676` (Répartition sévérité)
+- etc.
+
+Sans cette section Kibana ne saurait pas quelle visualisation mettre dans quel panneau.
+
+---
+
+**Résumé visuel :**
+
+```
+panelsJSON              references
+──────────────────      ────────────────────────────
+panel_1 → x=0,y=0  →   id: 96cd82ec (Métriques clés)
+panel_2 → x=24,y=0 →   id: 0d6d3676 (Répartition)
+panel_3 → x=0,y=8  →   id: f2c5e267 (CVE priorité)
+panel_4 → x=24,y=8 →   id: a992e847 (Top vendeurs)
+panel_5 → x=0,y=16 →   id: a32d38e5 (Exploits)
+panel_6 → x=24,y=16→   id: 22d0c6d8 (Timeline)
+```
+Le dashboard est créé ! Ouvrez-le dans votre navigateur :
+
+```
+http://192.168.1.65:5601/app/dashboards#/view/3dfdd1ac-783e-4cf3-ae23-766080da545b
+```
+
+Ou via la navigation :
+```
+☰ Menu → Analytics → Dashboard → Threat Intelligence Dashboard
+```
+
+<img width="1915" height="980" alt="image" src="https://github.com/user-attachments/assets/9ebd65ec-976a-4653-9695-f2c9fc7e8c05" />
