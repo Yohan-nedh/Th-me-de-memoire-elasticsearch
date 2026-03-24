@@ -1899,4 +1899,77 @@ sleep 90
 curl -sk https://localhost:9200 -u elastic:elastic123 | python3 -m json.tool | grep name
 ```
 
+<img width="1915" height="980" alt="image" src="https://github.com/user-attachments/assets/106f060d-bdc8-49da-bb12-eb2126db1d3d" />
+
+🎉 **TLS fonctionne parfaitement !**
+
+- Elasticsearch répond en **HTTPS** ✅
+- Kibana est **available** ✅
+
+Maintenant mettons à jour les collecteurs pour utiliser HTTPS :
+
+```bash
+# Mettre à jour le .env
+cat > /home/ubuntu-server/memoire_ELK/collectors/.env << EOF
+ES_HOST=https://localhost:9200
+ES_USER=elastic
+ES_PASSWORD=elastic123
+NVD_API_KEY=153e15f0-888a-416f-92a2-878281e1643a
+EOF
+
+# Mettre à jour es_client.py
+cat > /home/ubuntu-server/memoire_ELK/collectors/es_client.py << 'EOF'
+import os
+from elasticsearch import Elasticsearch
+from dotenv import load_dotenv
+
+load_dotenv()
+
+def get_es_client():
+    host     = os.getenv("ES_HOST", "http://localhost:9200")
+    user     = os.getenv("ES_USER", "elastic")
+    password = os.getenv("ES_PASSWORD", "elastic123")
+
+    return Elasticsearch(
+        host,
+        basic_auth=(user, password),
+        verify_certs=False,
+        ssl_show_warn=False
+    )
+EOF
+
+# Tester
+cd /home/ubuntu-server/memoire_ELK/collectors
+python3 -c "from es_client import get_es_client; es=get_es_clhttps://overthewire.org/wargames/natas/natas0.htmlient(); print('ES ping:', es.ping())"
+```
+
 Partagez le résultat !
+
+```
+# Mettre à jour le service systemd
+sudo bash -c 'cat > /etc/systemd/system/threat-api.service << EOF
+[Unit]
+Description=Threat Intelligence API
+After=network.target
+
+[Service]
+User=ubuntu-server
+WorkingDirectory=/home/ubuntu-server/memoire_ELK/collectors
+EnvironmentFile=/home/ubuntu-server/memoire_ELK/collectors/.env
+ExecStart=/usr/bin/python3 -m uvicorn api:app --host 0.0.0.0 --port 8001
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF'
+
+sudo systemctl daemon-reload
+sudo systemctl restart threat-api
+sleep 10
+
+# Tester
+curl -s http://localhost:8001/health | python3 -m json.tool
+curl -s http://localhost:8001/stats | python3 -m json.tool | grep -E "total|exploited|avg"
+```
+
