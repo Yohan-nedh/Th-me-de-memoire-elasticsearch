@@ -1,0 +1,68 @@
+services:
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.13.0
+    container_name: elasticsearch
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=true
+      - xpack.security.http.ssl.enabled=true
+      - xpack.security.http.ssl.key=/usr/share/elasticsearch/config/certs/elasticsearch.key
+      - xpack.security.http.ssl.certificate=/usr/share/elasticsearch/config/certs/elasticsearch.crt
+      - xpack.security.transport.ssl.enabled=true
+      - xpack.security.transport.ssl.key=/usr/share/elasticsearch/config/certs/elasticsearch.key
+      - xpack.security.transport.ssl.certificate=/usr/share/elasticsearch/config/certs/elasticsearch.crt
+      - xpack.security.transport.ssl.verification_mode=none
+      - ELASTIC_PASSWORD=elastic123
+      - ES_JAVA_OPTS=-Xms3g -Xmx3g
+    ports:
+      - "9200:9200"
+    volumes:
+      - es_data:/usr/share/elasticsearch/data
+      - ./certs:/usr/share/elasticsearch/config/certs:ro
+    networks:
+      - elk-net
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.13.0
+    container_name: kibana
+    ports:
+      - "5601:5601"
+    environment:
+      - ELASTICSEARCH_HOSTS=https://elasticsearch:9200
+      - ELASTICSEARCH_SERVICEACCOUNTTOKEN=AAEAAWVsYXN0aWMva2liYW5hL2tpYmFuYV90b2tlbjI6Mi10OU56YndSc3F6SW9XSldWM0NkQQ
+      - ELASTICSEARCH_SSL_VERIFICATIONMODE=none
+      - SERVER_PUBLICBASEURL=http://192.168.1.67:5601
+      - XPACK_ENCRYPTEDSAVEDOBJECTS_ENCRYPTIONKEY=8a5127e0d5319a324d76166d9de66498b22946f69f8bda593ea6a75a214772fa
+      - XPACK_SECURITY_ENCRYPTIONKEY=8a5127e0d5319a324d76166d9de66498b22946f69f8bda593ea6a75a214772fa
+      - XPACK_REPORTING_ENCRYPTIONKEY=8a5127e0d5319a324d76166d9de66498b22946f69f8bda593ea6a75a214772fa
+      - XPACK_ACTIONS_EMAIL_DOMAIN_ALLOWLIST=["gmail.com"]
+      - XPACK_ACTIONS_SMTP_HOST=smtp.gmail.com
+      - XPACK_ACTIONS_SMTP_PORT=587
+      - XPACK_ACTIONS_SMTP_SECURE=false
+    depends_on:
+      - elasticsearch
+    networks:
+      - elk-net
+
+  logstash:
+    image: docker.elastic.co/logstash/logstash:8.13.0
+    container_name: logstash
+    ports:
+      - "5045:5045"
+      - "9600:9600"
+    volumes:
+      - ./logstash/pipeline:/usr/share/logstash/pipeline:ro
+      - ./logstash/config/logstash.yml:/usr/share/logstash/config/logstash.yml:ro
+    environment:
+      - LS_JAVA_OPTS=-Xms256m -Xmx256m
+    depends_on:
+      - elasticsearch
+    networks:
+      - elk-net
+
+volumes:
+  es_data:
+
+networks:
+  elk-net:
+    driver: bridge

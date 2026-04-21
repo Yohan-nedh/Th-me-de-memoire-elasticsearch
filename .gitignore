@@ -1,0 +1,13 @@
+# Certificats et clés privées
+certs/elasticsearch.key
+
+# Cache Python
+collectors/__pycache__/
+*.pyc
+
+# Logs
+logs/
+*.log
+
+# Variables d'environnement
+.env
